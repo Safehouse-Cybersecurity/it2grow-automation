@@ -19,7 +19,7 @@ param(
 $ErrorActionPreference = 'Continue'
 
 Write-Host "`n=== Windows Server 2025 Generalization ===" -ForegroundColor Cyan
-Write-Host "IT2Grow B.V.`n" -ForegroundColor Cyan
+Write-Host "it2Grow B.V.`n" -ForegroundColor Cyan
 
 # 1. Clean temp files
 Write-Host "[1/7] Cleaning temporary files..." -ForegroundColor Yellow
