@@ -21,40 +21,39 @@ Write-Host "`n=== Windows Server 2025 Generalization ===" -ForegroundColor Cyan
 Write-Host "IT2Grow B.V.`n" -ForegroundColor Cyan
 
 # 1. Clean temp files
-Write-Host "[1/5] Cleaning temporary files..." -ForegroundColor Yellow
+Write-Host "[1/6] Cleaning temporary files..." -ForegroundColor Yellow
 Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:LOCALAPPDATA\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:SystemRoot\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host "      Done" -ForegroundColor Green
 
 # 2. Clear event logs
-Write-Host "[2/5] Clearing event logs..." -ForegroundColor Yellow
+Write-Host "[2/6] Clearing event logs..." -ForegroundColor Yellow
 wevtutil el | ForEach-Object { wevtutil cl "$_" 2>$null }
 Write-Host "      Done" -ForegroundColor Green
 
 # 3. Reset network
-Write-Host "[3/5] Resetting network..." -ForegroundColor Yellow
+Write-Host "[3/6] Resetting network..." -ForegroundColor Yellow
 ipconfig /release *>$null
 ipconfig /flushdns *>$null
 Write-Host "      Done" -ForegroundColor Green
 
 # 4. Sophos cleanup
 if (-not $SkipSophos) {
-    Write-Host "[4/5] Cleaning Sophos identity..." -ForegroundColor Yellow
+    Write-Host "[4/6] Cleaning Sophos identity..." -ForegroundColor Yellow
     
     $sophosServices = Get-Service -Name "Sophos*" -ErrorAction SilentlyContinue
-    $sophosPath = "$env:ProgramData\Sophos"
+    $sophosInstalled = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | 
+                       Where-Object { $_.DisplayName -like "*Sophos*" }
     
-    if ($sophosServices -or (Test-Path $sophosPath)) {
+    if ($sophosServices -or $sophosInstalled) {
         $cleaned = $false
         
-        # Stop services
         if ($sophosServices) {
             $sophosServices | Stop-Service -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
         }
         
-        # Remove identity files
         $persistPath = "$env:ProgramData\Sophos\Management Communications System\Endpoint\Persist"
         if (Test-Path $persistPath) {
             $items = Get-ChildItem $persistPath -ErrorAction SilentlyContinue
@@ -72,7 +71,6 @@ if (-not $SkipSophos) {
             $cleaned = $true
         }
         
-        # Clear registry
         $regPath = "HKLM:\SOFTWARE\Sophos\Management Communications System\Endpoint"
         if ((Test-Path $regPath) -and (Get-ItemProperty $regPath -Name "Id" -ErrorAction SilentlyContinue)) {
             Remove-ItemProperty $regPath -Name "Id" -Force -ErrorAction SilentlyContinue
@@ -90,21 +88,37 @@ if (-not $SkipSophos) {
         if ($cleaned) {
             Write-Host "      Done - endpoint will re-register after clone" -ForegroundColor Green
         } else {
-            Write-Host "      Sophos found but no identity data to clean" -ForegroundColor Yellow
+            Write-Host "      Sophos installed but no identity data found" -ForegroundColor Yellow
         }
     } else {
         Write-Host "      Sophos not installed, skipping" -ForegroundColor Gray
     }
 } else {
-    Write-Host "[4/5] Skipping Sophos cleanup" -ForegroundColor Gray
+    Write-Host "[4/6] Skipping Sophos cleanup" -ForegroundColor Gray
 }
 
-# 5. Sysprep
+# 5. Fix AppX issues for sysprep (Edge etc)
+Write-Host "[5/6] Fixing AppX for sysprep..." -ForegroundColor Yellow
+$deprovisionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
+$appsToFix = @(
+    "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
+    "Microsoft.MicrosoftEdgeDevToolsClient_8wekyb3d8bbwe"
+)
+foreach ($app in $appsToFix) {
+    $keyPath = "$deprovisionPath\$app"
+    if (-not (Test-Path $keyPath)) {
+        New-Item -Path $keyPath -Force | Out-Null
+        Write-Host "      Marked as deprovisioned: $app" -ForegroundColor Gray
+    }
+}
+Write-Host "      Done" -ForegroundColor Green
+
+# 6. Sysprep
 if (-not $SkipSysprep) {
-    Write-Host "[5/5] Running sysprep..." -ForegroundColor Yellow
+    Write-Host "[6/6] Running sysprep..." -ForegroundColor Yellow
     Write-Host "      System will shutdown when complete..." -ForegroundColor Yellow
     Start-Process "$env:SystemRoot\System32\Sysprep\sysprep.exe" -ArgumentList "/generalize /oobe /shutdown /mode:vm" -Wait
 } else {
-    Write-Host "[5/5] Skipping sysprep" -ForegroundColor Gray
+    Write-Host "[6/6] Skipping sysprep" -ForegroundColor Gray
     Write-Host "`nCleanup complete. Run sysprep manually when ready." -ForegroundColor Green
 }
