@@ -4,8 +4,8 @@
 .DESCRIPTION
     Cleans up the system, removes Sophos identity, and runs sysprep
 .EXAMPLE
-    .\Invoke-Generalization.ps1
-    .\Invoke-Generalization.ps1 -SkipSysprep
+    .\Prepare-Template.ps1
+    .\Prepare-Template.ps1 -SkipSysprep
 #>
 
 param(
@@ -29,9 +29,7 @@ Write-Host "      Done" -ForegroundColor Green
 
 # 2. Clear event logs
 Write-Host "[2/5] Clearing event logs..." -ForegroundColor Yellow
-Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | ForEach-Object {
-    [System.Diagnostics.Eventing.Reader.EventLogSession]::GlobalSession.ClearLog($_.LogName) 2>$null
-}
+wevtutil el | ForEach-Object { wevtutil cl "$_" 2>$null }
 Write-Host "      Done" -ForegroundColor Green
 
 # 3. Reset network
@@ -44,20 +42,56 @@ Write-Host "      Done" -ForegroundColor Green
 if (-not $SkipSophos) {
     Write-Host "[4/5] Cleaning Sophos identity..." -ForegroundColor Yellow
     
-    if (Test-Path "$env:ProgramData\Sophos") {
+    $sophosServices = Get-Service -Name "Sophos*" -ErrorAction SilentlyContinue
+    $sophosPath = "$env:ProgramData\Sophos"
+    
+    if ($sophosServices -or (Test-Path $sophosPath)) {
+        $cleaned = $false
+        
         # Stop services
-        Get-Service -Name "Sophos*" -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
+        if ($sophosServices) {
+            $sophosServices | Stop-Service -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+        }
         
         # Remove identity files
-        Remove-Item "$env:ProgramData\Sophos\Management Communications System\Endpoint\Persist\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item "$env:ProgramData\Sophos\AutoUpdate\data\machine_ID.txt" -Force -ErrorAction SilentlyContinue
+        $persistPath = "$env:ProgramData\Sophos\Management Communications System\Endpoint\Persist"
+        if (Test-Path $persistPath) {
+            $items = Get-ChildItem $persistPath -ErrorAction SilentlyContinue
+            if ($items) {
+                Remove-Item "$persistPath\*" -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Host "      Removed: MCS Persist folder" -ForegroundColor Gray
+                $cleaned = $true
+            }
+        }
+        
+        $machineIdPath = "$env:ProgramData\Sophos\AutoUpdate\data\machine_ID.txt"
+        if (Test-Path $machineIdPath) {
+            Remove-Item $machineIdPath -Force -ErrorAction SilentlyContinue
+            Write-Host "      Removed: machine_ID.txt" -ForegroundColor Gray
+            $cleaned = $true
+        }
         
         # Clear registry
-        Remove-ItemProperty "HKLM:\SOFTWARE\Sophos\Management Communications System\Endpoint" -Name "Id" -Force -ErrorAction SilentlyContinue
-        Remove-ItemProperty "HKLM:\SOFTWARE\WOW6432Node\Sophos\Management Communications System\Endpoint" -Name "Id" -Force -ErrorAction SilentlyContinue
+        $regPath = "HKLM:\SOFTWARE\Sophos\Management Communications System\Endpoint"
+        if ((Test-Path $regPath) -and (Get-ItemProperty $regPath -Name "Id" -ErrorAction SilentlyContinue)) {
+            Remove-ItemProperty $regPath -Name "Id" -Force -ErrorAction SilentlyContinue
+            Write-Host "      Removed: Registry Id" -ForegroundColor Gray
+            $cleaned = $true
+        }
         
-        Write-Host "      Done - endpoint will re-register after clone" -ForegroundColor Green
+        $regPath64 = "HKLM:\SOFTWARE\WOW6432Node\Sophos\Management Communications System\Endpoint"
+        if ((Test-Path $regPath64) -and (Get-ItemProperty $regPath64 -Name "Id" -ErrorAction SilentlyContinue)) {
+            Remove-ItemProperty $regPath64 -Name "Id" -Force -ErrorAction SilentlyContinue
+            Write-Host "      Removed: Registry Id (WOW64)" -ForegroundColor Gray
+            $cleaned = $true
+        }
+        
+        if ($cleaned) {
+            Write-Host "      Done - endpoint will re-register after clone" -ForegroundColor Green
+        } else {
+            Write-Host "      Sophos found but no identity data to clean" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "      Sophos not installed, skipping" -ForegroundColor Gray
     }
