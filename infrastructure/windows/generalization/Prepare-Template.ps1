@@ -97,39 +97,29 @@ if (-not $SkipSophos) {
     Write-Host "[4/6] Skipping Sophos cleanup" -ForegroundColor Gray
 }
 
-# 5. Fix AppX issues for sysprep
-Write-Host "[5/6] Fixing AppX for sysprep..." -ForegroundColor Yellow
+Write-Host "[5/6] Normalizing Edge for Sysprep..." -ForegroundColor Yellow
 
-# Remove Edge using its setup.exe
-$edgePaths = @(
-    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\*\Installer\setup.exe",
-    "$env:ProgramFiles\Microsoft\Edge\Application\*\Installer\setup.exe"
-)
+# Remove user-installed Edge packages only
+Get-AppxPackage -AllUsers Microsoft.MicrosoftEdge.Stable |
+    Where-Object { $_.PackageUserInformation.InstallState -eq "Installed" } |
+    Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 
-$edgeSetup = $null
-foreach ($path in $edgePaths) {
-    $found = Get-Item $path -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found) { $edgeSetup = $found.FullName; break }
+# Re-register provisioned Edge (important)
+$prov = Get-AppxProvisionedPackage -Online |
+        Where-Object DisplayName -eq "Microsoft.MicrosoftEdge.Stable"
+
+if ($prov) {
+    Write-Host "      Re-registering provisioned Edge..." -ForegroundColor Gray
+    Add-AppxProvisionedPackage `
+        -Online `
+        -PackagePath $prov.PackagePath `
+        -SkipLicense `
+        -ErrorAction SilentlyContinue
 }
 
-if ($edgeSetup) {
-    Write-Host "      Removing Microsoft Edge..." -ForegroundColor Gray
-    Start-Process -FilePath $edgeSetup -ArgumentList "--uninstall --system-level --force-uninstall" -Wait -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
-}
-
-# Remove Edge AppX packages
-Get-AppxPackage -AllUsers *MicrosoftEdge* | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like "*Edge*" } | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
-
-# Mark any remaining problematic apps as deprovisioned
-$deprovisionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
-Get-AppxPackage -AllUsers | ForEach-Object {
-    $keyPath = "$deprovisionPath\$($_.PackageFamilyName)"
-    if (-not (Test-Path $keyPath)) {
-        New-Item -Path $keyPath -Force | Out-Null
-    }
-}
+# Optional: reset WebView2 (common hidden culprit)
+Get-AppxPackage -AllUsers Microsoft.WebView2Runtime |
+    Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
 
 Write-Host "      Done" -ForegroundColor Green
 
