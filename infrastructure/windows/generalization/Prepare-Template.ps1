@@ -97,12 +97,15 @@ if (-not $SkipSophos) {
     Write-Host "[4/6] Skipping Sophos cleanup" -ForegroundColor Gray
 }
 
-# 5. Fix AppX issues for sysprep (Edge etc)
+# 5. Fix AppX issues for sysprep
 Write-Host "[5/6] Fixing AppX for sysprep..." -ForegroundColor Yellow
 $deprovisionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
+
+# Mark known problematic apps as deprovisioned
 $appsToFix = @(
     "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
-    "Microsoft.MicrosoftEdgeDevToolsClient_8wekyb3d8bbwe"
+    "Microsoft.MicrosoftEdgeDevToolsClient_8wekyb3d8bbwe",
+    "Microsoft.MicrosoftEdge.Stable_8wekyb3d8bbwe"
 )
 foreach ($app in $appsToFix) {
     $keyPath = "$deprovisionPath\$app"
@@ -111,6 +114,17 @@ foreach ($app in $appsToFix) {
         Write-Host "      Marked as deprovisioned: $app" -ForegroundColor Gray
     }
 }
+
+# Also mark any other user-installed AppX packages
+$userApps = Get-AppxPackage -AllUsers | Where-Object { $_.SignatureKind -eq "Store" }
+foreach ($app in $userApps) {
+    $keyPath = "$deprovisionPath\$($app.PackageFamilyName)"
+    if (-not (Test-Path $keyPath)) {
+        New-Item -Path $keyPath -Force | Out-Null
+        Write-Host "      Marked as deprovisioned: $($app.PackageFamilyName)" -ForegroundColor Gray
+    }
+}
+
 Write-Host "      Done" -ForegroundColor Green
 
 # 6. Sysprep
