@@ -99,29 +99,35 @@ if (-not $SkipSophos) {
 
 # 5. Fix AppX issues for sysprep
 Write-Host "[5/6] Fixing AppX for sysprep..." -ForegroundColor Yellow
-$deprovisionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
 
-# Mark known problematic apps as deprovisioned
-$appsToFix = @(
-    "Microsoft.MicrosoftEdge_8wekyb3d8bbwe",
-    "Microsoft.MicrosoftEdgeDevToolsClient_8wekyb3d8bbwe",
-    "Microsoft.MicrosoftEdge.Stable_8wekyb3d8bbwe"
+# Remove Edge using its setup.exe
+$edgePaths = @(
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\*\Installer\setup.exe",
+    "$env:ProgramFiles\Microsoft\Edge\Application\*\Installer\setup.exe"
 )
-foreach ($app in $appsToFix) {
-    $keyPath = "$deprovisionPath\$app"
-    if (-not (Test-Path $keyPath)) {
-        New-Item -Path $keyPath -Force | Out-Null
-        Write-Host "      Marked as deprovisioned: $app" -ForegroundColor Gray
-    }
+
+$edgeSetup = $null
+foreach ($path in $edgePaths) {
+    $found = Get-Item $path -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) { $edgeSetup = $found.FullName; break }
 }
 
-# Also mark any other user-installed AppX packages
-$userApps = Get-AppxPackage -AllUsers | Where-Object { $_.SignatureKind -eq "Store" }
-foreach ($app in $userApps) {
-    $keyPath = "$deprovisionPath\$($app.PackageFamilyName)"
+if ($edgeSetup) {
+    Write-Host "      Removing Microsoft Edge..." -ForegroundColor Gray
+    Start-Process -FilePath $edgeSetup -ArgumentList "--uninstall --system-level --force-uninstall" -Wait -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+}
+
+# Remove Edge AppX packages
+Get-AppxPackage -AllUsers *MicrosoftEdge* | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like "*Edge*" } | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+
+# Mark any remaining problematic apps as deprovisioned
+$deprovisionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Deprovisioned"
+Get-AppxPackage -AllUsers | ForEach-Object {
+    $keyPath = "$deprovisionPath\$($_.PackageFamilyName)"
     if (-not (Test-Path $keyPath)) {
         New-Item -Path $keyPath -Force | Out-Null
-        Write-Host "      Marked as deprovisioned: $($app.PackageFamilyName)" -ForegroundColor Gray
     }
 }
 
