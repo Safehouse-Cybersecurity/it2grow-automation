@@ -28,7 +28,7 @@ function Add-Check {
 }
 
 Write-Host "`n=== Windows Server 2025 Post-Deployment ===" -ForegroundColor Cyan
-Write-Host "IT2Grow B.V.`n" -ForegroundColor Cyan
+Write-Host "it2grow B.V.`n" -ForegroundColor Cyan
 
 #region Detect Existing Configuration
 $currentName = $env:COMPUTERNAME
