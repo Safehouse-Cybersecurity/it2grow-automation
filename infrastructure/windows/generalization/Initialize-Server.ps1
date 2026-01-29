@@ -38,8 +38,8 @@ $currentIP = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IP
 $currentGW = (Get-NetRoute -InterfaceIndex $adapter.ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue).NextHop
 $currentDNS = (Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4).ServerAddresses
 
-# Check if hostname is non-default (not WIN-XXXXXX pattern)
-$isDefaultHostname = $currentName -match '^WIN-[A-Z0-9]{7,}$'
+# Check if hostname is non-default (not WIN-XXXXXX or TPL-xxx pattern)
+$isDefaultHostname = $currentName -match '^(WIN-[A-Z0-9]{7,}|TPL-[A-Z0-9]+)$'
 
 # Check if IP is static (not DHCP)
 $isStaticIP = $currentIP -and $currentIP.PrefixOrigin -eq 'Manual'
