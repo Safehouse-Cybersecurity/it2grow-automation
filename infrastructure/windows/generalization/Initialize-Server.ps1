@@ -102,14 +102,14 @@ if (-not $skipConfig) {
 #region Configuration (if needed)
 if (-not $skipConfig) {
     # 1. Set computer name
-    Write-Host "[1/3] Setting computer name to $ComputerName..." -ForegroundColor Yellow
+    Write-Host "[1/4] Setting computer name to $ComputerName..." -ForegroundColor Yellow
     if ($ComputerName -ne $currentName) {
         Rename-Computer -NewName $ComputerName -Force -ErrorAction SilentlyContinue
     }
     Write-Host "      Done" -ForegroundColor Green
 
     # 2. Configure network
-    Write-Host "[2/3] Configuring network..." -ForegroundColor Yellow
+    Write-Host "[2/4] Configuring network..." -ForegroundColor Yellow
 
     if ($IPAddress) {
         Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | 
@@ -141,10 +141,35 @@ if (-not $skipConfig) {
     Write-Host "      Done" -ForegroundColor Green
 
     # 3. Verify QEMU Guest Agent
-    Write-Host "[3/3] Checking QEMU Guest Agent..." -ForegroundColor Yellow
+    Write-Host "[3/4] Checking QEMU Guest Agent..." -ForegroundColor Yellow
     $qemu = Get-Service -Name "QEMU-GA" -ErrorAction SilentlyContinue
     if ($qemu -and $qemu.Status -ne 'Running') {
         Start-Service -Name "QEMU-GA" -ErrorAction SilentlyContinue
+    }
+    Write-Host "      Done" -ForegroundColor Green
+
+    # 4. Azure Arc Onboarding
+    Write-Host "[4/4] Azure Arc onboarding..." -ForegroundColor Yellow
+    $arcScriptPath = "C:\ProgramData\AzureArc\connect.ps1"
+    
+    if (Test-Path $arcScriptPath) {
+        $runArc = Read-Host "Run Azure Arc onboarding now? (Y/n)"
+        if ($runArc -eq '' -or $runArc -eq 'y' -or $runArc -eq 'Y') {
+            try {
+                Write-Host "      Running Arc onboarding script..." -ForegroundColor Gray
+                & $arcScriptPath
+                Write-Host "      Arc onboarding completed" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "      Failed: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "      You can run it manually later: $arcScriptPath" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "      Skipped - Run manually: $arcScriptPath" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "      Arc script not found at $arcScriptPath" -ForegroundColor Yellow
+        Write-Host "      Place connect.ps1 in C:\ProgramData\AzureArc\ and run manually" -ForegroundColor Gray
     }
     Write-Host "      Done" -ForegroundColor Green
     Write-Host ""
@@ -248,7 +273,7 @@ $arcAgent = Test-Path "${env:ProgramFiles}\AzureConnectedMachineAgent\azcmagent.
 if ($arcService -and $arcService.Status -eq 'Running') {
     Add-Check -Name "Azure Arc" -Status "Pass" -Value "Connected" -Fix ""
 } elseif ($arcAgent) {
-    Add-Check -Name "Azure Arc" -Status "Warning" -Value "Installed, not connected" -Fix "Run Arc onboarding script"
+    Add-Check -Name "Azure Arc" -Status "Warning" -Value "Installed, not connected" -Fix "Run C:\ProgramData\AzureArc\connect.ps1"
 } else {
     Add-Check -Name "Azure Arc" -Status "Fail" -Value "Not installed" -Fix "Run Arc onboarding script from Azure Portal"
 }
@@ -450,9 +475,9 @@ $html += @"
         <h2>Next Steps</h2>
         <ol>
             <li>Complete any failed/warning items above</li>
-            <li>Run Azure Arc onboarding script</li>
+            <li>Run Azure Arc onboarding script (if not already completed)</li>
             <li>Install Sophos Endpoint from Sophos Central</li>
-            <li>Reboot to apply computer name</li>
+            <li>Reboot to apply computer name (if changed)</li>
         </ol>
         
         <div class="footer">
