@@ -116,16 +116,8 @@ if ! command -v azcmagent >/dev/null 2>&1; then
   # Import Microsoft GPG key
   rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
   
-  # Try to install packages-microsoft-prod for detected version
-  # Rocky 10 might need to use RHEL 9 repos as fallback
-  RHEL_VERSION="${OS_VERSION_ID}"
-  if [[ "${OS_VERSION_ID}" == "10" ]]; then
-    log "Rocky Linux 10 detected - using RHEL 9 repository as fallback"
-    RHEL_VERSION="9"
-  fi
-  
-  log "Configuring Microsoft repository for RHEL ${RHEL_VERSION}..."
-  if rpm -Uvh "https://packages.microsoft.com/config/rhel/${RHEL_VERSION}/packages-microsoft-prod.rpm" >>"${LOGFILE}" 2>&1; then
+  log "Configuring Microsoft repository for RHEL ${OS_VERSION_ID}..."
+  if rpm -Uvh "https://packages.microsoft.com/config/rhel/${OS_VERSION_ID}/packages-microsoft-prod.rpm" >>"${LOGFILE}" 2>&1; then
     log "Microsoft repository configured successfully"
     
     log "Installing azcmagent package via dnf..."
@@ -142,14 +134,22 @@ if ! command -v azcmagent >/dev/null 2>&1; then
   if ! command -v azcmagent >/dev/null 2>&1; then
     log "Method 2: Downloading Arc agent RPM directly..."
     
+    # Clean up any broken repo files that might have been created
+    log "Cleaning up any broken repository configurations..."
+    rm -f /etc/yum.repos.d/azure-connected-machine-agent.repo 2>/dev/null || true
+    rm -f /etc/yum.repos.d/prod.repo 2>/dev/null || true
+    dnf clean all >>"${LOGFILE}" 2>&1 || true
+    
     if curl -fsSL --max-time 180 --connect-timeout 30 \
          -o /tmp/azcmagent.rpm \
          https://aka.ms/azcmagent-rhel 2>>"${LOGFILE}"; then
       
       log "Download successful. File size: $(du -h /tmp/azcmagent.rpm | awk '{print $1}')"
-      log "Installing RPM with dnf..."
+      log "Installing RPM directly (bypassing repositories)..."
       
-      dnf -y install /tmp/azcmagent.rpm >>"${LOGFILE}" 2>&1
+      # Use rpm directly to avoid repo issues
+      rpm -Uvh /tmp/azcmagent.rpm >>"${LOGFILE}" 2>&1 || \
+        dnf -y install --disablerepo='*' /tmp/azcmagent.rpm >>"${LOGFILE}" 2>&1
       rm -f /tmp/azcmagent.rpm
     else
       log "ERROR: Failed to download Arc agent RPM from https://aka.ms/azcmagent-rhel"
