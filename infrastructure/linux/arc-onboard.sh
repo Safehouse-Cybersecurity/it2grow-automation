@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# Azure Arc onboarding for Rocky Linux 10
-# - Installs Azure CLI (without packages-microsoft-prod)
-# - Installs Arc agent
-# - Downloads SP certificate from Key Vault (RBAC)
-# - Supports PEM or PFX -> converts to PEM if needed
-# - Connects to Azure Arc, then securely deletes the PEM
+# Azure Arc: install agent + connect using SP certificate from Azure Key Vault (RBAC)
+# Works on Rocky Linux 10+ (no packages-microsoft-prod required)
 
 set -euo pipefail
 
 usage() {
   cat <<'USAGE'
 Usage:
-  arc-onboard.sh \
+  arc-install-and-connect.sh \
     --sp-app-id <GUID> \
     --tenant-id <GUID> \
     --resource-group <name> \
@@ -20,21 +16,9 @@ Usage:
     --kv-cert-name <kv-certificate-name> \
     [--log /var/log/arc-onboard.log]
 
-Notes:
-- Requires an active 'az login' context that can read the secret in Key Vault
-  (e.g., a bootstrap SP/user with the **Key Vault Secrets User** role at the vault scope).
-- The service principal identified by --sp-app-id must already have a certificate
-  stored in Key Vault under --kv-cert-name.
-
-Examples:
-  arc-onboard.sh \
-    --sp-app-id 00000000-0000-0000-0000-000000000000 \
-    --tenant-id 11111111-1111-1111-1111-111111111111 \
-    --resource-group rg-arc-prod-weu-001 \
-    --location westeurope \
-    --keyvault kv-arc-prod-weu-001 \
-    --kv-cert-name sp-arc-prod-onboarding
-USAGE
+Requirements:
+- Caller running this script must already be 'az login'-ed as an identity with
+  **Key Vault Secrets User** on the specified vault (RBAC model). (To read the cert secret) [MS Learn] USAGE
 }
 
 # ---------- Parse args ----------
@@ -73,9 +57,9 @@ need curl
 need unzip
 need openssl
 
-# Azure CLI (Rocky/RHEL 9+/10) – add yum repo directly (no packages-microsoft-prod)
+# Ensure Azure CLI without packages-microsoft-prod (works on Rocky 9/10)
 if ! command -v az >/dev/null 2>&1; then
-  log "Installing Azure CLI ..."
+  log "Installing Azure CLI (yum repo method) ..."
   rpm --import https://packages.microsoft.com/keys/microsoft.asc
   tee /etc/yum.repos.d/azure-cli.repo >/dev/null << 'EOF'
 [azure-cli]
@@ -88,7 +72,7 @@ EOF
   dnf install -y azure-cli
 fi
 
-# Arc agent
+# Install Azure Arc Connected Machine agent (official method for RHEL family)
 if ! command -v azcmagent >/dev/null 2>&1; then
   log "Installing Azure Connected Machine agent ..."
   set +e
@@ -96,7 +80,7 @@ if ! command -v azcmagent >/dev/null 2>&1; then
   RC=$?
   set -e
   if [[ $RC -ne 0 || ! -x "$(command -v azcmagent)" ]]; then
-    log "Fallback: downloading agent RPM explicitly ..."
+    log "Fallback: download RPM and install via dnf ..."
     curl -fsSL -o /tmp/azcmagent.rpm https://aka.ms/azcmagent-rhel
     dnf -y install /tmp/azcmagent.rpm
   fi
@@ -104,44 +88,41 @@ fi
 
 # ---------- Pre-check Azure auth context ----------
 if ! az account show >/dev/null 2>&1; then
-  log "No active 'az login' found. Please 'az login' with an identity that has Key Vault 'Secrets User' on vault '${KV_NAME}'."
+  log "No active 'az login'. Please 'az login' with an identity that has 'Key Vault Secrets User' on vault '${KV_NAME}'."
   exit 1
 fi
 
-# ---------- Download certificate secret from Key Vault ----------
-log "Inspecting Key Vault secret content type ..."
+# ---------- Download certificate secret from Key Vault (RBAC model) ----------
+log "Checking Key Vault secret content type ..."
 CONTENT_TYPE="$(az keyvault secret show --vault-name "${KV_NAME}" --name "${KV_CERT_NAME}" --query contentType -o tsv || true)"
-log "Key Vault secret contentType='${CONTENT_TYPE:-<empty>}'"
+log "contentType='${CONTENT_TYPE:-<empty>}'"
 
-log "Downloading certificate secret (binary) ..."
+log "Downloading certificate secret payload ..."
 az keyvault secret download \
   --vault-name "${KV_NAME}" \
   --name "${KV_CERT_NAME}" \
   --file "${CERT_BLOB}" 1>>"${LOGFILE}"
-
 chmod 600 "${CERT_BLOB}"
 
 # Convert to PEM if needed
 if [[ "${CONTENT_TYPE,,}" == *"application/x-pem-file"* ]]; then
-  log "Secret appears to be PEM; renaming to ${CERT_PEM}"
+  log "Detected PEM content; using as-is."
   mv "${CERT_BLOB}" "${CERT_PEM}"
 elif [[ "${CONTENT_TYPE,,}" == *"application/x-pkcs12"* || -z "${CONTENT_TYPE}" ]]; then
-  log "Secret appears to be PFX (or unspecified). Converting PFX -> PEM (no passphrase) ..."
-  # Many KV cert secrets are PFX with empty password
+  log "Detected PFX (or unspecified); converting PFX -> PEM (no passphrase) ..."
   openssl pkcs12 -in "${CERT_BLOB}" -nodes -out "${CERT_PEM}" -passin pass: || {
-    log "ERROR: Failed to convert PFX to PEM. Check that the secret really contains a certificate with private key."
+    log "ERROR converting PFX to PEM. Ensure the secret contains a certificate with private key."
     exit 1
   }
   shred -u "${CERT_BLOB}" || rm -f "${CERT_BLOB}"
 else
-  log "Unknown contentType. Attempting PEM path as fallback ..."
+  log "Unknown contentType; attempting PEM as fallback ..."
   mv "${CERT_BLOB}" "${CERT_PEM}"
 fi
-
 chmod 600 "${CERT_PEM}"
 
-# ---------- Login as SP with certificate & connect to Arc ----------
-log "Logging in with service principal certificate ..."
+# ---------- Login with SP certificate & connect to Arc ----------
+log "Authenticating as Service Principal using certificate ..."
 az logout --username "${SP_APP_ID}" >/dev/null 2>&1 || true
 az login --service-principal \
   --username "${SP_APP_ID}" \
@@ -149,7 +130,7 @@ az login --service-principal \
   --password "${CERT_PEM}" 1>>"${LOGFILE}"
 
 HOST="$(hostname -f || hostname)"
-log "Connecting '${HOST}' to Azure Arc (${AZ_LOCATION}) ..."
+log "Connecting host '${HOST}' to Azure Arc (${AZ_LOCATION}) ..."
 azcmagent connect \
   --service-principal-id "${SP_APP_ID}" \
   --service-principal-certificate "${CERT_PEM}" \
@@ -161,8 +142,9 @@ log "Arc status:"
 azcmagent show | tee -a "${LOGFILE}"
 
 # ---------- Cleanup onboarding credential ----------
-log "Securely deleting PEM (onboarding credential) ..."
+log "Securely deleting PEM (onboarding credential only needed for connect) ..."
 shred -u "${CERT_PEM}" || rm -f "${CERT_PEM}"
 
-log "Azure Arc onboarding completed successfully."
+log "Azure Arc agent installed & machine connected successfully."
+log "Note: Arc managed identity credentials are stored under /var/opt/azcmagent/certs with restricted ACLs—do not modify."
 exit 0
