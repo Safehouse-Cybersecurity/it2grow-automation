@@ -96,34 +96,74 @@ EOF
   dnf install -y azure-cli >>"${LOGFILE}" 2>&1
 fi
 
-# Install Azure Arc Connected Machine agent using dnf (cleaner method)
+# Install Azure Arc Connected Machine agent
 if ! command -v azcmagent >/dev/null 2>&1; then
-  log "Installing Azure Connected Machine agent via dnf repository..."
+  log "Installing Azure Connected Machine agent..."
   
-  # Import Microsoft GPG key if not already done
+  # Detect OS version for proper repository
+  if [[ -f /etc/os-release ]]; then
+    source /etc/os-release
+    OS_VERSION_ID="${VERSION_ID%%.*}"  # Get major version only
+    log "Detected: ${NAME} ${VERSION_ID} (Major: ${OS_VERSION_ID})"
+  else
+    OS_VERSION_ID="9"  # Default fallback
+    log "WARNING: Could not detect OS version, defaulting to RHEL 9 repos"
+  fi
+  
+  # Try dnf installation with packages-microsoft-prod.rpm
+  log "Method 1: Installing via Microsoft package repository..."
+  
+  # Import Microsoft GPG key
   rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
   
-  # Add Microsoft repository for Azure Arc
-  log "Adding Microsoft Azure Arc repository..."
-  tee /etc/yum.repos.d/azure-connected-machine-agent.repo >/dev/null << 'EOF'
-[azure-connected-machine-agent]
-name=Azure Connected Machine Agent
-baseurl=https://packages.microsoft.com/yumrepos/azure-connected-machine-agent/
-enabled=1
-gpgcheck=1
-gpgkey=https://packages.microsoft.com/keys/microsoft.asc
-EOF
-
-  log "Installing azcmagent package..."
-  dnf install -y azcmagent >>"${LOGFILE}" 2>&1
+  # Try to install packages-microsoft-prod for detected version
+  # Rocky 10 might need to use RHEL 9 repos as fallback
+  RHEL_VERSION="${OS_VERSION_ID}"
+  if [[ "${OS_VERSION_ID}" == "10" ]]; then
+    log "Rocky Linux 10 detected - using RHEL 9 repository as fallback"
+    RHEL_VERSION="9"
+  fi
   
-  # Verify installation
+  log "Configuring Microsoft repository for RHEL ${RHEL_VERSION}..."
+  if rpm -Uvh "https://packages.microsoft.com/config/rhel/${RHEL_VERSION}/packages-microsoft-prod.rpm" >>"${LOGFILE}" 2>&1; then
+    log "Microsoft repository configured successfully"
+    
+    log "Installing azcmagent package via dnf..."
+    if dnf install -y azcmagent >>"${LOGFILE}" 2>&1; then
+      log "azcmagent installed successfully via dnf"
+    else
+      log "WARNING: dnf install failed, will try direct RPM download"
+    fi
+  else
+    log "WARNING: Could not configure Microsoft repository, will try direct RPM download"
+  fi
+  
+  # Fallback: Direct RPM download if dnf method failed
+  if ! command -v azcmagent >/dev/null 2>&1; then
+    log "Method 2: Downloading Arc agent RPM directly..."
+    
+    if curl -fsSL --max-time 180 --connect-timeout 30 \
+         -o /tmp/azcmagent.rpm \
+         https://aka.ms/azcmagent-rhel 2>>"${LOGFILE}"; then
+      
+      log "Download successful. File size: $(du -h /tmp/azcmagent.rpm | awk '{print $1}')"
+      log "Installing RPM with dnf..."
+      
+      dnf -y install /tmp/azcmagent.rpm >>"${LOGFILE}" 2>&1
+      rm -f /tmp/azcmagent.rpm
+    else
+      log "ERROR: Failed to download Arc agent RPM from https://aka.ms/azcmagent-rhel"
+      log "Troubleshooting:"
+      log "  - Check network connectivity: curl -I https://packages.microsoft.com"
+      log "  - Check DNS resolution: nslookup aka.ms"
+      log "  - Check firewall: sudo firewall-cmd --list-all"
+      exit 1
+    fi
+  fi
+  
+  # Final verification
   if ! command -v azcmagent >/dev/null 2>&1; then
     log "ERROR: azcmagent installation failed. Check ${LOGFILE} for details."
-    log "Troubleshooting:"
-    log "  - Verify network connectivity: curl -I https://packages.microsoft.com"
-    log "  - Check repository: dnf repolist | grep azure"
-    log "  - Try manual install: dnf install -y azcmagent"
     exit 1
   fi
   
