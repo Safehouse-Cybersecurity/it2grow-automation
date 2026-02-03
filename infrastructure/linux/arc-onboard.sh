@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Azure Arc: install agent + connect using SP certificate from Azure Key Vault (RBAC)
 # Works on Rocky Linux 10+ (no packages-microsoft-prod required)
+# Updated: Uses dnf to install Arc agent from Microsoft repository
 
 set -euo pipefail
 
@@ -73,7 +74,7 @@ fi
 need() { 
   if ! command -v "$1" >/dev/null 2>&1; then
     log "Installing $1 ..."
-    dnf -y install "$1"
+    dnf -y install "$1" >>"${LOGFILE}" 2>&1
   fi
 }
 need curl
@@ -92,22 +93,41 @@ enabled=1
 gpgcheck=1
 gpgkey=https://packages.microsoft.com/keys/microsoft.asc
 EOF
-  dnf install -y azure-cli
+  dnf install -y azure-cli >>"${LOGFILE}" 2>&1
 fi
 
-# Install Azure Arc Connected Machine agent (official method for RHEL family)
+# Install Azure Arc Connected Machine agent using dnf (cleaner method)
 if ! command -v azcmagent >/dev/null 2>&1; then
-  log "Installing Azure Connected Machine agent ..."
-  set +e
-  rpm -Uvh --quiet https://aka.ms/azcmagent-rhel 2>>"${LOGFILE}"
-  RC=$?
-  set -e
-  if [[ $RC -ne 0 || ! -x "$(command -v azcmagent)" ]]; then
-    log "Fallback: download RPM and install via dnf ..."
-    curl -fsSL -o /tmp/azcmagent.rpm https://aka.ms/azcmagent-rhel
-    dnf -y install /tmp/azcmagent.rpm
-    rm -f /tmp/azcmagent.rpm
+  log "Installing Azure Connected Machine agent via dnf repository..."
+  
+  # Import Microsoft GPG key if not already done
+  rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
+  
+  # Add Microsoft repository for Azure Arc
+  log "Adding Microsoft Azure Arc repository..."
+  tee /etc/yum.repos.d/azure-connected-machine-agent.repo >/dev/null << 'EOF'
+[azure-connected-machine-agent]
+name=Azure Connected Machine Agent
+baseurl=https://packages.microsoft.com/yumrepos/azure-connected-machine-agent/
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+EOF
+
+  log "Installing azcmagent package..."
+  dnf install -y azcmagent >>"${LOGFILE}" 2>&1
+  
+  # Verify installation
+  if ! command -v azcmagent >/dev/null 2>&1; then
+    log "ERROR: azcmagent installation failed. Check ${LOGFILE} for details."
+    log "Troubleshooting:"
+    log "  - Verify network connectivity: curl -I https://packages.microsoft.com"
+    log "  - Check repository: dnf repolist | grep azure"
+    log "  - Try manual install: dnf install -y azcmagent"
+    exit 1
   fi
+  
+  log "azcmagent installed successfully: $(azcmagent version)"
 fi
 
 # ---------- Pre-check Azure auth context ----------
