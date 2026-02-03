@@ -31,23 +31,24 @@ USAGE
 }
 
 # ---------- Parse arguments ----------
-SP_APP_ID=""; SP_SECRET=""; TENANT_ID=""; RG=""; AZ_LOCATION=""
+SP_APP_ID=""; SP_SECRET=""; TENANT_ID=""; SUBSCRIPTION_ID=""; RG=""; AZ_LOCATION=""
 LOGFILE="/var/log/arc-onboard.log"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --sp-app-id)      SP_APP_ID="$2"; shift 2 ;;
-    --sp-secret)      SP_SECRET="$2"; shift 2 ;;
-    --tenant-id)      TENANT_ID="$2"; shift 2 ;;
-    --resource-group) RG="$2"; shift 2 ;;
-    --location)       AZ_LOCATION="$2"; shift 2 ;;
-    --log)            LOGFILE="$2"; shift 2 ;;
-    -h|--help)        usage; exit 0 ;;
+    --sp-app-id)       SP_APP_ID="$2"; shift 2 ;;
+    --sp-secret)       SP_SECRET="$2"; shift 2 ;;
+    --tenant-id)       TENANT_ID="$2"; shift 2 ;;
+    --subscription-id) SUBSCRIPTION_ID="$2"; shift 2 ;;
+    --resource-group)  RG="$2"; shift 2 ;;
+    --location)        AZ_LOCATION="$2"; shift 2 ;;
+    --log)             LOGFILE="$2"; shift 2 ;;
+    -h|--help)         usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
   esac
 done
 
-for v in SP_APP_ID SP_SECRET TENANT_ID RG AZ_LOCATION; do
+for v in SP_APP_ID SP_SECRET TENANT_ID SUBSCRIPTION_ID RG AZ_LOCATION; do
   if [[ -z "${!v:-}" ]]; then 
     echo "ERROR: Missing required parameter: --${v//_/-}"
     usage
@@ -119,6 +120,7 @@ if ! azcmagent connect \
   --resource-name "${HOST}" \
   --service-principal-id "${SP_APP_ID}" \
   --service-principal-secret "${SP_SECRET}" \
+  --subscription-id "${SUBSCRIPTION_ID}" \
   --resource-group "${RG}" \
   --tenant-id "${TENANT_ID}" \
   --location "${AZ_LOCATION}" \
