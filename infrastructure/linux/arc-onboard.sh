@@ -18,7 +18,14 @@ Usage:
 
 Requirements:
 - Caller running this script must already be 'az login'-ed as an identity with
-  **Key Vault Secrets User** on the specified vault (RBAC model). (To read the cert secret) [MS Learn] USAGE
+  **Key Vault Secrets User** role on the specified vault (RBAC model) to read the certificate secret.
+- The Service Principal must have **Azure Connected Machine Onboarding** role on the target Resource Group.
+- Machine must not already be Arc-connected (check with: azcmagent show)
+
+Notes:
+- Certificate in Key Vault must be in PFX or PEM format with private key included.
+- PFX certificates are assumed to have no password (standard for KV-exported certs).
+USAGE
 }
 
 # ---------- Parse args ----------
@@ -51,8 +58,24 @@ mkdir -p "${WORKDIR}"
 touch "${LOGFILE}"; chmod 600 "${LOGFILE}"
 log(){ echo "[$(date -Is)] $*" | tee -a "${LOGFILE}"; }
 
+CORRELATION_ID="$(uuidgen 2>/dev/null || date +%s)"
+log "=== Azure Arc Onboarding Session: ${CORRELATION_ID} ==="
+
+# ---------- Pre-flight checks ----------
+if command -v azcmagent >/dev/null 2>&1; then
+  if azcmagent show >/dev/null 2>&1; then
+    log "ERROR: Machine is already Arc-connected. Run 'sudo azcmagent disconnect' first if re-onboarding is needed."
+    exit 1
+  fi
+fi
+
 # ---------- Ensure tools ----------
-need() { command -v "$1" >/dev/null 2>&1 || dnf -y install "$1"; }
+need() { 
+  if ! command -v "$1" >/dev/null 2>&1; then
+    log "Installing $1 ..."
+    dnf -y install "$1"
+  fi
+}
 need curl
 need unzip
 need openssl
@@ -76,32 +99,46 @@ fi
 if ! command -v azcmagent >/dev/null 2>&1; then
   log "Installing Azure Connected Machine agent ..."
   set +e
-  rpm -Uvh --quiet https://aka.ms/azcmagent-rhel
+  rpm -Uvh --quiet https://aka.ms/azcmagent-rhel 2>>"${LOGFILE}"
   RC=$?
   set -e
   if [[ $RC -ne 0 || ! -x "$(command -v azcmagent)" ]]; then
     log "Fallback: download RPM and install via dnf ..."
     curl -fsSL -o /tmp/azcmagent.rpm https://aka.ms/azcmagent-rhel
     dnf -y install /tmp/azcmagent.rpm
+    rm -f /tmp/azcmagent.rpm
   fi
 fi
 
 # ---------- Pre-check Azure auth context ----------
 if ! az account show >/dev/null 2>&1; then
-  log "No active 'az login'. Please 'az login' with an identity that has 'Key Vault Secrets User' on vault '${KV_NAME}'."
+  log "ERROR: No active 'az login' session."
+  log "Please authenticate with an identity that has 'Key Vault Secrets User' role on vault '${KV_NAME}'."
   exit 1
 fi
 
+CURRENT_SUB=$(az account show --query id -o tsv)
+CURRENT_USER=$(az account show --query user.name -o tsv)
+log "Authenticated as: ${CURRENT_USER}"
+log "Using subscription: ${CURRENT_SUB}"
+
 # ---------- Download certificate secret from Key Vault (RBAC model) ----------
 log "Checking Key Vault secret content type ..."
-CONTENT_TYPE="$(az keyvault secret show --vault-name "${KV_NAME}" --name "${KV_CERT_NAME}" --query contentType -o tsv || true)"
+CONTENT_TYPE="$(az keyvault secret show --vault-name "${KV_NAME}" --name "${KV_CERT_NAME}" --query contentType -o tsv 2>>"${LOGFILE}" || true)"
 log "contentType='${CONTENT_TYPE:-<empty>}'"
 
-log "Downloading certificate secret payload ..."
-az keyvault secret download \
+log "Downloading certificate secret payload from vault '${KV_NAME}' ..."
+if ! az keyvault secret download \
   --vault-name "${KV_NAME}" \
   --name "${KV_CERT_NAME}" \
-  --file "${CERT_BLOB}" 1>>"${LOGFILE}"
+  --file "${CERT_BLOB}" 1>>"${LOGFILE}" 2>&1; then
+  log "ERROR: Failed to download certificate secret."
+  log "Verify that:"
+  log "  1. The current identity has 'Key Vault Secrets User' role on vault '${KV_NAME}'"
+  log "  2. Certificate '${KV_CERT_NAME}' exists in the vault"
+  log "  3. Key Vault firewall allows access from this machine"
+  exit 1
+fi
 chmod 600 "${CERT_BLOB}"
 
 # Convert to PEM if needed
@@ -109,42 +146,63 @@ if [[ "${CONTENT_TYPE,,}" == *"application/x-pem-file"* ]]; then
   log "Detected PEM content; using as-is."
   mv "${CERT_BLOB}" "${CERT_PEM}"
 elif [[ "${CONTENT_TYPE,,}" == *"application/x-pkcs12"* || -z "${CONTENT_TYPE}" ]]; then
-  log "Detected PFX (or unspecified); converting PFX -> PEM (no passphrase) ..."
-  openssl pkcs12 -in "${CERT_BLOB}" -nodes -out "${CERT_PEM}" -passin pass: || {
-    log "ERROR converting PFX to PEM. Ensure the secret contains a certificate with private key."
+  log "Detected PFX (or unspecified); converting PFX -> PEM (no passphrase assumed) ..."
+  if ! openssl pkcs12 -in "${CERT_BLOB}" -nodes -out "${CERT_PEM}" -passin pass: 2>>"${LOGFILE}"; then
+    log "ERROR: Failed to convert PFX to PEM."
+    log "Ensure the secret contains a valid certificate with private key included."
     exit 1
-  }
-  shred -u "${CERT_BLOB}" || rm -f "${CERT_BLOB}"
+  fi
+  shred -u "${CERT_BLOB}" 2>/dev/null || rm -f "${CERT_BLOB}"
 else
-  log "Unknown contentType; attempting PEM as fallback ..."
+  log "Unknown contentType '${CONTENT_TYPE}'; attempting PEM as fallback ..."
   mv "${CERT_BLOB}" "${CERT_PEM}"
 fi
 chmod 600 "${CERT_PEM}"
 
 # ---------- Login with SP certificate & connect to Arc ----------
-log "Authenticating as Service Principal using certificate ..."
-az logout --username "${SP_APP_ID}" >/dev/null 2>&1 || true
-az login --service-principal \
+log "Clearing any existing Azure CLI sessions ..."
+az account clear 2>/dev/null || true
+
+log "Authenticating as Service Principal (App ID: ${SP_APP_ID}) using certificate ..."
+if ! az login --service-principal \
   --username "${SP_APP_ID}" \
   --tenant "${TENANT_ID}" \
-  --password "${CERT_PEM}" 1>>"${LOGFILE}"
+  --password "${CERT_PEM}" 1>>"${LOGFILE}" 2>&1; then
+  log "ERROR: Service Principal authentication failed."
+  log "Verify that the certificate is valid and associated with App ID '${SP_APP_ID}'."
+  exit 1
+fi
 
-HOST="$(hostname -f || hostname)"
-log "Connecting host '${HOST}' to Azure Arc (${AZ_LOCATION}) ..."
-azcmagent connect \
+HOST="$(hostname -f 2>/dev/null || hostname)"
+log "Connecting host '${HOST}' to Azure Arc in resource group '${RG}' (${AZ_LOCATION}) ..."
+log "This may take 2-3 minutes ..."
+
+if ! azcmagent connect \
+  --resource-name "${HOST}" \
   --service-principal-id "${SP_APP_ID}" \
   --service-principal-certificate "${CERT_PEM}" \
   --resource-group "${RG}" \
   --tenant-id "${TENANT_ID}" \
-  --location "${AZ_LOCATION}" 1>>"${LOGFILE}"
+  --location "${AZ_LOCATION}" \
+  --tags "OS=Linux" \
+  --correlation-id "${CORRELATION_ID}" 1>>"${LOGFILE}" 2>&1; then
+  log "ERROR: azcmagent connect failed."
+  log "Common issues:"
+  log "  1. Service Principal lacks 'Azure Connected Machine Onboarding' role on RG '${RG}'"
+  log "  2. Network connectivity issues (proxy/firewall blocking *.guestconfiguration.azure.com)"
+  log "  3. Resource name '${HOST}' conflicts with existing Arc resource"
+  log "Check ${LOGFILE} for detailed error messages."
+  exit 1
+fi
 
-log "Arc status:"
+log "Arc connection successful! Verifying status ..."
 azcmagent show | tee -a "${LOGFILE}"
 
 # ---------- Cleanup onboarding credential ----------
-log "Securely deleting PEM (onboarding credential only needed for connect) ..."
-shred -u "${CERT_PEM}" || rm -f "${CERT_PEM}"
+log "Securely deleting PEM certificate (onboarding credential no longer needed) ..."
+shred -u "${CERT_PEM}" 2>/dev/null || rm -f "${CERT_PEM}"
 
-log "Azure Arc agent installed & machine connected successfully."
+log "=== Azure Arc agent installed & machine connected successfully ==="
+log "Correlation ID: ${CORRELATION_ID}"
 log "Note: Arc managed identity credentials are stored under /var/opt/azcmagent/certs with restricted ACLs—do not modify."
 exit 0
