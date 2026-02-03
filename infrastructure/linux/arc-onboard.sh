@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Azure Arc: install agent + connect using SP certificate from Azure Key Vault (RBAC)
 # Works on Rocky Linux 10+ (no packages-microsoft-prod required)
-# Updated: Uses dnf to install Arc agent from Microsoft repository
+# Updated: SP authenticates with client secret to download certificate from Key Vault
 
 set -euo pipefail
 
@@ -10,6 +10,7 @@ usage() {
 Usage:
   arc-install-and-connect.sh \
     --sp-app-id <GUID> \
+    --sp-secret <secret> \
     --tenant-id <GUID> \
     --resource-group <name> \
     --location <azure-region> \
@@ -18,24 +19,31 @@ Usage:
     [--log /var/log/arc-onboard.log]
 
 Requirements:
-- Caller running this script must already be 'az login'-ed as an identity with
-  **Key Vault Secrets User** role on the specified vault (RBAC model) to read the certificate secret.
-- The Service Principal must have **Azure Connected Machine Onboarding** role on the target Resource Group.
+- The Service Principal must have:
+  - **Key Vault Secrets User** role on the Key Vault (to download the certificate)
+  - **Azure Connected Machine Onboarding** role on the Resource Group (to connect to Arc)
 - Machine must not already be Arc-connected (check with: azcmagent show)
+
+Authentication Flow:
+1. SP authenticates with client secret → downloads certificate from Key Vault
+2. SP uses certificate → connects machine to Azure Arc
+3. Certificate is securely deleted after successful connection
 
 Notes:
 - Certificate in Key Vault must be in PFX or PEM format with private key included.
 - PFX certificates are assumed to have no password (standard for KV-exported certs).
+- Client secret is only used for bootstrap authentication, not stored.
 USAGE
 }
 
 # ---------- Parse args ----------
-SP_APP_ID=""; TENANT_ID=""; RG=""; AZ_LOCATION=""; KV_NAME=""; KV_CERT_NAME=""
+SP_APP_ID=""; SP_SECRET=""; TENANT_ID=""; RG=""; AZ_LOCATION=""; KV_NAME=""; KV_CERT_NAME=""
 LOGFILE="/var/log/arc-onboard.log"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sp-app-id)      SP_APP_ID="$2"; shift 2 ;;
+    --sp-secret)      SP_SECRET="$2"; shift 2 ;;
     --tenant-id)      TENANT_ID="$2"; shift 2 ;;
     --resource-group) RG="$2"; shift 2 ;;
     --location)       AZ_LOCATION="$2"; shift 2 ;;
@@ -47,7 +55,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for v in SP_APP_ID TENANT_ID RG AZ_LOCATION KV_NAME KV_CERT_NAME; do
+for v in SP_APP_ID SP_SECRET TENANT_ID RG AZ_LOCATION KV_NAME KV_CERT_NAME; do
   if [[ -z "${!v:-}" ]]; then echo "Missing --${v//_/-}"; usage; exit 1; fi
 done
 
@@ -170,17 +178,27 @@ if ! command -v azcmagent >/dev/null 2>&1; then
   log "azcmagent installed successfully: $(azcmagent version)"
 fi
 
-# ---------- Pre-check Azure auth context ----------
-if ! az account show >/dev/null 2>&1; then
-  log "ERROR: No active 'az login' session."
-  log "Please authenticate with an identity that has 'Key Vault Secrets User' role on vault '${KV_NAME}'."
+# ---------- Authenticate with SP client secret ----------
+log "Authenticating with Service Principal using client secret..."
+log "App ID: ${SP_APP_ID}"
+
+# Clear any existing sessions
+az account clear 2>/dev/null || true
+
+if ! az login --service-principal \
+  --username "${SP_APP_ID}" \
+  --tenant "${TENANT_ID}" \
+  --password "${SP_SECRET}" 1>>"${LOGFILE}" 2>&1; then
+  log "ERROR: Service Principal authentication failed."
+  log "Verify that:"
+  log "  1. App ID '${SP_APP_ID}' is correct"
+  log "  2. Client secret is valid and not expired"
+  log "  3. SP exists in tenant '${TENANT_ID}'"
   exit 1
 fi
 
 CURRENT_SUB=$(az account show --query id -o tsv)
-CURRENT_USER=$(az account show --query user.name -o tsv)
-log "Authenticated as: ${CURRENT_USER}"
-log "Using subscription: ${CURRENT_SUB}"
+log "Authenticated successfully. Using subscription: ${CURRENT_SUB}"
 
 # ---------- Download certificate secret from Key Vault (RBAC model) ----------
 log "Checking Key Vault secret content type ..."
@@ -194,7 +212,7 @@ if ! az keyvault secret download \
   --file "${CERT_BLOB}" 1>>"${LOGFILE}" 2>&1; then
   log "ERROR: Failed to download certificate secret."
   log "Verify that:"
-  log "  1. The current identity has 'Key Vault Secrets User' role on vault '${KV_NAME}'"
+  log "  1. Service Principal has 'Key Vault Secrets User' role on vault '${KV_NAME}'"
   log "  2. Certificate '${KV_CERT_NAME}' exists in the vault"
   log "  3. Key Vault firewall allows access from this machine"
   exit 1
@@ -219,16 +237,15 @@ else
 fi
 chmod 600 "${CERT_PEM}"
 
-# ---------- Login with SP certificate & connect to Arc ----------
-log "Clearing any existing Azure CLI sessions ..."
+# ---------- Re-authenticate with certificate for Arc connection ----------
+log "Re-authenticating with Service Principal using downloaded certificate..."
 az account clear 2>/dev/null || true
 
-log "Authenticating as Service Principal (App ID: ${SP_APP_ID}) using certificate ..."
 if ! az login --service-principal \
   --username "${SP_APP_ID}" \
   --tenant "${TENANT_ID}" \
   --password "${CERT_PEM}" 1>>"${LOGFILE}" 2>&1; then
-  log "ERROR: Service Principal authentication failed."
+  log "ERROR: Certificate-based authentication failed."
   log "Verify that the certificate is valid and associated with App ID '${SP_APP_ID}'."
   exit 1
 fi
@@ -258,8 +275,8 @@ fi
 log "Arc connection successful! Verifying status ..."
 azcmagent show | tee -a "${LOGFILE}"
 
-# ---------- Cleanup onboarding credential ----------
-log "Securely deleting PEM certificate (onboarding credential no longer needed) ..."
+# ---------- Cleanup onboarding credentials ----------
+log "Securely deleting certificate (onboarding credential no longer needed) ..."
 shred -u "${CERT_PEM}" 2>/dev/null || rm -f "${CERT_PEM}"
 
 log "=== Azure Arc agent installed & machine connected successfully ==="
